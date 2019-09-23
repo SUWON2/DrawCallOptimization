@@ -1,18 +1,25 @@
 /*
-	제작자: 이수원, 이메일: entryswlee@gmail.com
+	이메일: entryswlee@gmail.com
 
 	이 소스 코드는 OpenGLES 3.1 버전을 사용하여 DrawCall을 1로 만드는 방법을 소개합니다.
-	순수 기술 설명을 위해 C-Style로 코드를 작성했으며 Desktop에서 구동시키 위해 GLFW 라이브러를 사용합니다.
+	보통 여러 텍스처를 한 번에 패스하기 위해 텍스처 아틀라스를 사용합니다.
+	그러나 이러한 방식은 유연성이 떨어집니다.
+	예를 들어 2048x32 크기 이미지를 사용한다면 자른 후에 텍스처 아틀라스에 배치를 해야거나 아예 이미지 하나를 따로 처리해야 되는 경우가 생깁니다.
+	또 임의의 이미지가 어느 한 텍스처 아틀라스에 배치되어 있다고 하면 그 이미지 하나만 사용하더라도
+	그 텍스처 아틀라스에 있는 모든 이미지를 불러오기 때문에 성능에 영향을 미칩니다.
+	그러나 이 샘플 코드는 이러한 단점들을 모두 해결합니다.
 
+	순수 기술 설명을 위해 C-Style로 코드를 작성했으며 Desktop에서 구동시키 위해 GLFW 라이브러를 사용합니다.
 	만약 모바일 포팅을 원하는 경우 NDK를 이용하셔야 됩니다.
-	모바일로 포팅할 때는 안드로이드 스튜디오를 이용하는 방법도 있지만 구글을 통해 비주얼 스튜디오로도 포팅할 수 있는 방법을 찾을 수 있습니다.
+	모바일로 포팅할 때 안드로이드 스튜디오를 이용하는 방법도 있지만 구글을 통해 비주얼 스튜디오로도 포팅할 수 있는 방법을 찾을 수 있습니다.
 
 	사용한 기술은 Instancing Rendering, Texture Array, Astc Compression이며 이 세 기술을 다 사용하기 위해서는 최소 OpenGLES 3.1 버전 이상을 필요로 합니다.
-	즉 옛날 스마트폰에서는 호환이 안 될 수 있기 때문에 자세한 내용은 검색해 보세요
-	만약 DirectX 사용자라면 이 코드 로직만 이해해도 DirectX 11 이상 버전에서는 이 기술을 적용할 수 있을 겁니다.
+	즉 옛날 스마트폰에서는 호환이 안 될 수 있기 때문에 유의하셔야 됩니다.
+	그리고 이 소스 코드는 CPU와 관련된 것이지 GPU는 셰이더 구간과 VRAM에 저장되는 방식을 제외하고는 거의 관련이 없습니다.
+	만약 DirectX 사용자라면 동작 원리만 파악해도 DirectX 11 이상 버전에서는 이 기술을 적용할 수 있을 겁니다.
 
-	알고리즘 설명은 ~에서 합니다.
-	혹시 궁금한 게 있으면 위에 기재된 이메일로 문의주세요!!
+	코드를 분석할 때는 main 함수부터 추적하는 방식을 추천합니다.
+	마지막으로 궁금한 점이나 개선점이 있으면 이메일 주세요~
 */
 
 #include <iostream>
@@ -32,12 +39,12 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-// Namespaces
+/*** Namespaces ***/
 using namespace std;
 using namespace glm;
 
-// Structures
-struct TextureInfo
+/*** Structures ***/
+struct Sprite
 {
 	std::string imagePath;
 	float x;
@@ -61,16 +68,19 @@ struct AstcHeader
 	unsigned char zsize[3];
 };
 
-// Constant Variables
+/*** Constant Variables ***/
 static constexpr int SCREEN_WIDTH = 1280;
 static constexpr int SCREEN_HEIGHT = 720;
-static constexpr int TEXTURE_COUNT = 30000;
+
+// GPU 사용량이 90% 근처일 때까지 스프라이트 개수를 조정하여 CPU 사용량을 테스트해 보세요!
+// 그리고 주의할 점은 Release 모드로 설정한 뒤 테스트를 하셔야 됩니다.
+static constexpr int SPRITE_COUNT = 3500;
 
 static const mat4 PROJECTION_VIEW = 
 	ortho(0.0f, static_cast<float>(SCREEN_WIDTH), 0.0f, static_cast<float>(SCREEN_HEIGHT), 1.0f, -100.0f)
 	* translate(mat4(1.0f), vec3(0.0f, 0.0f, 0.0f));
 
-// Global Variables
+/*** Global Variables ***/
 static GLuint ShaderProgram = 0;
 static GLuint VAO = 0;
 static GLuint VBO = 0;
@@ -79,23 +89,23 @@ static GLuint ProjectionViewWorldVBO = 0;
 static GLuint TextureAttributeVBO = 0;
 static GLuint TextureArray = 0;
 
-static TextureInfo TextureInfos[TEXTURE_COUNT];
-static unordered_map<string, uvec3> TextureAttributes;
-static unique_ptr<vec4[]> TextureAttributeBuffer = nullptr;
-static unique_ptr<mat4[]> ProjectionViewWorldBuffer = nullptr;
+static Sprite Sprites[SPRITE_COUNT]; // 이미지 경로, 위치를 저장합니다.
+static unordered_map<string, uvec3> TextureAttributes; // 중복을 제외한 텍스처 속성들을 저장합니다.
+static unique_ptr<vec3[]> TextureAttributeBuffer = nullptr; // 셰이더에 사용될 텍스처 속성 버퍼입니다.
+static unique_ptr<mat4[]> ProjectionViewWorldBuffer = nullptr; // 셰이더에 사용될 PVW 버퍼입니다.
 
-// Global Functions
+/*** Global Functions ***/
 static void ShowGlfwError(int error, const char* description);
 static void Initialize();
 static void Update();
 static void Shutdown();
 
-static void InitializeTextureAtlas(const TextureInfo* textureInfos);
+static void InitializeTextureAtlas();
 static void LoadTexture(const char* fileName, uint32_t* textureOffsetX, size_t* allAstcDataSize, std::list<AstcFile>* astcFiles);
 static void CompileShader(GLuint* shader, const GLenum type, const char* shaderFilePath);
 
-// Defines
-#ifdef _DEBUG
+/*** Defines ***/
+#ifdef _DEBUG // gl 함수를 호출할 때 오류가 있는지 검사합니다. 디버그 모드일 때만 작동합니다.
 	#define GL_CALL(x) \
 			(x); \
 			{ \
@@ -122,7 +132,7 @@ int main()
 		assert(false && "Failed to initialize glfw");
 	}
 
-	// 오픈지엘ES 버전을 3.1로 지정한다.
+	// OpenGLES 버전을 3.1로 지정합니다.
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
 	glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -132,14 +142,15 @@ int main()
 	assert(window != nullptr && "Failed to create window");
 
 	glfwMakeContextCurrent(window);
-	glfwSwapInterval(0);
-
+	
+	// 오픈지엘 초기화, 텍스처 로드 등을 처리합니다.
 	Initialize();
 
 	while (glfwWindowShouldClose(window) == false)
 	{
 		std::chrono::system_clock::time_point beforeTime = std::chrono::system_clock::now();
 
+		// 셰이더 업데이트, 렌더링 등을 처리합니다.
 		Update();
 
 		glfwPollEvents();
@@ -167,7 +178,7 @@ void Initialize()
 {
 	GL_CALL(glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT));
 
-	// 셰이더를 초기화한다.
+	// 셰이더를 초기화합니다.
 	{
 		GLuint vertexShader = 0;
 		CompileShader(&vertexShader, GL_VERTEX_SHADER, "Shaders/SpriteVS.glsl");
@@ -180,14 +191,14 @@ void Initialize()
 		GL_CALL(glAttachShader(ShaderProgram, fragmentShader));
 		GL_CALL(glLinkProgram(ShaderProgram));
 
-		// 셰이더를 하나만 사용한다는 전제하에 프로그램 시작할 때만 지정한다.
+		// 셰이더를 하나만 사용한다는 전제하에 프로그램 시작할 때만 지정합니다.
 		GL_CALL(glUseProgram(ShaderProgram));
 
 		GL_CALL(glDeleteShader(vertexShader));
 		GL_CALL(glDeleteShader(fragmentShader));
 	}
 
-	// 정점 형태를 초기화한다.
+	// 정점 형태를 초기화합니다.
 	{
 		constexpr float vertices[] =
 		{
@@ -210,7 +221,7 @@ void Initialize()
 		GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, VBO));
 		GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW));
 
-		// 정점 데이터가 무엇인지 셰이더에게 알려준다.
+		// 정점 데이터가 무엇인지 셰이더에게 알려줍니다.
 		GL_CALL(glEnableVertexAttribArray(0));
 		GL_CALL(glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr));
 
@@ -219,63 +230,71 @@ void Initialize()
 		GL_CALL(glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW));
 	}
 
-	// 텍스처를 초기화한다.
+	// 스프라이트를 초기화합니다.
 	{
+		// 각 스프라이트의 위치를 랜덤으로 배치하기 위한 변수입니다.
 		default_random_engine randomEngine;
 		uniform_int_distribution<int> uidHorizontalRange(0, SCREEN_WIDTH);
 		uniform_int_distribution<int> uidVerticalRange(0, SCREEN_HEIGHT);
+		uniform_int_distribution<int> uidImageKindRange(0, 33);
 		
-		for (int i = 0; i < TEXTURE_COUNT; ++i)
+		for (int i = 0; i < SPRITE_COUNT; ++i)
 		{
-			TextureInfos[i] =
+			/*
+				ASTC 파일이란 이미지를 압축하는 포맷의 한 종류로 비디오 메모리 사용량을 줄입니다.
+				유니티 엔진 또한 이 압축 포맷을 지원하며 높은 OpenGLES 버전을 요구합니다.
+				또 압축 시간이 매우 오래 걸리기 때문에 사전에 이미지를 ASTC 파일로 압축하고 사용해야 됩니다.
+				압축할 때는 astc-encoder 혹은 Mali Texture Compression Tool을 사용하면 됩니다.
+			*/
+
+			Sprites[i] =
 			{
-				"Resources/stand.0.astc"
+				"Resources/" + to_string(uidImageKindRange(randomEngine)) + ".astc"
 				, static_cast<float>(uidHorizontalRange(randomEngine))
 				, static_cast<float>(uidVerticalRange(randomEngine))
 			};
 		}
 
-		InitializeTextureAtlas(TextureInfos);
+		InitializeTextureAtlas();
 	}
 }
 
 void Update()
 {
-	for (int i = 0; i < TEXTURE_COUNT; ++i)
+	for (int i = 0; i < SPRITE_COUNT; ++i)
 	{
-		const TextureInfo& textureInfo = TextureInfos[i];
-		const vec2 spritePosition = { textureInfo.x, textureInfo.y };
-		const uvec3 textureAttribute = TextureAttributes[textureInfo.imagePath];
+		const Sprite& Sprite = Sprites[i];
+		const vec2 spritePosition = { Sprite.x, Sprite.y };
+		const uvec3& textureAttribute = TextureAttributes[Sprite.imagePath];
 
 		constexpr float depth = 0.0f;
 		ProjectionViewWorldBuffer[i] = translate(PROJECTION_VIEW, vec3(spritePosition, depth));
 		ProjectionViewWorldBuffer[i] = scale(ProjectionViewWorldBuffer[i], { uvec2(textureAttribute), 0.0f });
 
-		constexpr float alpha = 1.0f;
-		TextureAttributeBuffer[i] = { textureAttribute, alpha };
+		TextureAttributeBuffer[i] = textureAttribute;
 	}
 
-	// 비디오 메모리에 mProjectionViewWorlds의 데이터를 적용합니다.
+	// 비디오 메모리에 ProjectionViewWorldBuffer 데이터를 적용합니다.
 	{
 		GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, ProjectionViewWorldVBO));
 
 		void* dataPtr = GL_CALL(glMapBufferOES(GL_ARRAY_BUFFER, GL_WRITE_ONLY));
-		memcpy(dataPtr, ProjectionViewWorldBuffer.get(), sizeof(mat4) * TEXTURE_COUNT);
+		memcpy(dataPtr, ProjectionViewWorldBuffer.get(), sizeof(mat4) * SPRITE_COUNT);
 
 		GL_CALL(glUnmapBufferOES(GL_ARRAY_BUFFER));
 	}
 
-	// 비디오 메모리에 mTextureAttributes의 데이터를 적용합니다.
+	// 비디오 메모리에 TextureAttributeBuffer 데이터를 적용합니다.
 	{
 		GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, TextureAttributeVBO));
 
 		void* dataPtr = GL_CALL(glMapBufferOES(GL_ARRAY_BUFFER, GL_WRITE_ONLY));
-		memcpy(dataPtr, TextureAttributeBuffer.get(), sizeof(vec4) * TEXTURE_COUNT);
+		memcpy(dataPtr, TextureAttributeBuffer.get(), sizeof(vec3) * SPRITE_COUNT);
 
 		GL_CALL(glUnmapBufferOES(GL_ARRAY_BUFFER));
 	}
 
-	GL_CALL(glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, TEXTURE_COUNT));
+	GL_CALL(glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, SPRITE_COUNT));
 }
 
 void Shutdown()
@@ -286,9 +305,9 @@ void Shutdown()
 	GL_CALL(glDeleteProgram(ShaderProgram));
 }
 
-void InitializeTextureAtlas(const TextureInfo* textureInfos)
+void InitializeTextureAtlas()
 {
-	// projectionViewWorld가 무엇인지 셰이더에게 알려준다.
+	// ProjectionViewWorldVBO가 무엇인지 셰이더에게 알려줍니다.
 	{
 		GL_CALL(glGenBuffers(1, &ProjectionViewWorldVBO));
 		GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, ProjectionViewWorldVBO));
@@ -300,36 +319,63 @@ void InitializeTextureAtlas(const TextureInfo* textureInfos)
 			GL_CALL(glVertexAttribDivisor(i, 1));
 		}
 
-		GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(mat4) * TEXTURE_COUNT, nullptr, GL_DYNAMIC_DRAW));
+		GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(mat4) * SPRITE_COUNT, nullptr, GL_DYNAMIC_DRAW));
 	}
 
-	// TextureAttributeVBO가 무엇인지 셰이더에게 알려준다.
+	// TextureAttributeVBO가 무엇인지 셰이더에게 알려줍니다.
 	{
 		GL_CALL(glGenBuffers(1, &TextureAttributeVBO));
 		GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, TextureAttributeVBO));
 
 		GL_CALL(glEnableVertexAttribArray(5));
-		GL_CALL(glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(vec4), nullptr));
+		GL_CALL(glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(vec3), nullptr));
 		GL_CALL(glVertexAttribDivisor(5, 1));
 
-		GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(vec4) * TEXTURE_COUNT, nullptr, GL_DYNAMIC_DRAW));
+		GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(vec3) * SPRITE_COUNT, nullptr, GL_DYNAMIC_DRAW));
 	}
 
-	// 텍스처 아틀라스를 만든다.
+	// 텍스처 아틀라스를 만듭니다.
 	{
+		/*
+			이 코드 구간이 가장 중요합니다.
+			우선 모든 ASTC 파일 데이터 모두를 저장하기 위한 큰 버퍼를 하나 할당하고 데이터를 저장시킵니다.
+			그리고 512x512 크기를 가진 텍스처를 필요한 만큼 몇 개 만듭니다. 여기서 사용되는 방식이 텍스처 어레입니다.
+			마지막으로 버퍼를 텍스처 어레이에 저장합니다.
+
+			위 방법이 가능한 이유는 임의의 이미지 하나를 준비해 주세요
+			그리고 이미지를 하나 더 복사한 후에 윗 부분을 잘라 밑부분만 남겨주세요 이때 공백은 없어야 됩니다.
+			그럼 원본 이미지와 밑부분만 남겨진 이미지가 준비되는데 이 두 개를 각각 ASTC 파일로 압축해 주세요
+			마지막으로 두 압축 파일을 헥스 에디터같은 걸로 비교해 보면 아마 밑부분만 있는 ASTC 파일 내용이 원본 이미지 ASTC 파일 내용에 속해있을 겁니다.
+			즉 제 방식은 512x512와 같이 큰 이미지에 모든 이미지를 순차적으로 넣는 개념입니다.
+		*/
+
 		size_t allAstcDataSize = 0;
 		uint32_t currentTextureArrayOffsetX = 0;
 		std::list<AstcFile> astcFiles;
 
-		for (int i = 0; i < TEXTURE_COUNT; ++i)
+		for (int i = 0; i < SPRITE_COUNT; ++i)
 		{
-			LoadTexture(textureInfos[i].imagePath.c_str(), &currentTextureArrayOffsetX, &allAstcDataSize, &astcFiles);
+			LoadTexture(Sprites[i].imagePath.c_str(), &currentTextureArrayOffsetX, &allAstcDataSize, &astcFiles);
 		}
 
 		constexpr GLsizei textureArrayWidth = 512;
 		constexpr GLsizei textureArrayHeight = 512;
 		constexpr GLsizei textureArrayArea = textureArrayWidth * textureArrayHeight;
 		const GLsizei textureArrayDepth = static_cast<GLsizei>(ceilf(allAstcDataSize / static_cast<float>(textureArrayArea)));
+
+		// 모든 ASTC파일 데이터를 저장하기 위한 이미지 버퍼입니다.
+		size_t dataIndex = 0;
+		auto imageDatas = std::make_unique<uint8_t[]>(textureArrayArea * textureArrayDepth);
+
+		// ASTC 파일을 읽어 이미지 버퍼에 저장합니다.
+		for (const auto& astcFile : astcFiles)
+		{
+			fseek(astcFile.data, sizeof(AstcHeader), SEEK_SET);
+			fread(imageDatas.get() + dataIndex, astcFile.size, 1, astcFile.data);
+			dataIndex += astcFile.size;
+
+			fclose(astcFile.data);
+		}
 
 		GL_CALL(glGenTextures(1, &TextureArray));
 		GL_CALL(glBindTexture(GL_TEXTURE_2D_ARRAY, TextureArray));
@@ -345,20 +391,7 @@ void InitializeTextureAtlas(const TextureInfo* textureInfos)
 		const GLint uTexSamplerArrayID = GL_CALL(glGetUniformLocation(ShaderProgram, "uTexArraySampler"));
 		GL_CALL(glUniform1i(uTexSamplerArrayID, 0));
 
-		size_t dataIndex = 0;
-		auto imageDatas = std::make_unique<uint8_t[]>(textureArrayArea * textureArrayDepth);
-
-		// Read astc file to imageDatas
-		for (const auto& astcFile : astcFiles)
-		{
-			fseek(astcFile.data, sizeof(AstcHeader), SEEK_SET);
-			fread(imageDatas.get() + dataIndex, astcFile.size, 1, astcFile.data);
-			dataIndex += astcFile.size;
-
-			fclose(astcFile.data);
-		}
-
-		// Register image data to texture array
+		// 텍스처 어레이에 이미지 버퍼를 등록합니다.
 		for (int i = 0; i < textureArrayDepth; ++i)
 		{
 			GL_CALL(glCompressedTexSubImage3D(
@@ -376,8 +409,9 @@ void InitializeTextureAtlas(const TextureInfo* textureInfos)
 			));
 		}
 
-		ProjectionViewWorldBuffer = std::make_unique<mat4[]>(TEXTURE_COUNT);
-		TextureAttributeBuffer = std::make_unique<vec4[]>(TEXTURE_COUNT);
+		// 셰이더에 사용될 두 버퍼를 할당합니다.
+		ProjectionViewWorldBuffer = std::make_unique<mat4[]>(SPRITE_COUNT);
+		TextureAttributeBuffer = std::make_unique<vec3[]>(SPRITE_COUNT);
 	}
 }
 
@@ -385,7 +419,7 @@ void LoadTexture(const char* fileName, uint32_t* textureOffsetX, size_t* allAstc
 {
 	const auto& findedTextureAttribute = TextureAttributes.find(fileName);
 
-	// Exclude texture that have already been added.
+	// 이미 등록된 텍스처는 제외하고 기존에 있는 걸 사용하는 방식으로 처리하여 메모리 낭비를 줄입니다.
 	if (findedTextureAttribute != TextureAttributes.end())
 	{
 		return;
@@ -398,32 +432,37 @@ void LoadTexture(const char* fileName, uint32_t* textureOffsetX, size_t* allAstc
 	uint32_t imageHeight = 0;
 	size_t astcDataSize = 0;
 
-	// astc 자료: https://arm-software.github.io/opengl-es-sdk-for-android/astc_textures.html
+	// 이미지의 가로 세로 크기와 파일 크기를 가져옵니다.
 	{
+		/*
+			ASTC에 대해 더 자세히 알고 싶으면 아래 링크를 참고하세요
+			astc 참고: https://arm-software.github.io/opengl-es-sdk-for-android/astc_textures.html
+			여기서 중요한 건 저는 블록 크기를 4x4로 지정했다는 것입니다.
+			만약 다른 블록 크기를 원하신다면 main.cpp과 셰이더 코드를 수정하면 됩니다.
+		*/
+
 		AstcHeader astcHeader;
 		fread(&astcHeader, sizeof(AstcHeader), 1, astcData);
 
 		imageWidth = astcHeader.xsize[0] + (astcHeader.xsize[1] << 8) + (astcHeader.xsize[2] << 16);
 		imageHeight = astcHeader.ysize[0] + (astcHeader.ysize[1] << 8) + (astcHeader.ysize[2] << 16);
 
-		// Compute number of blocks in each direction.
 		const int xBlocks = (imageWidth + astcHeader.blockdim_x - 1) / astcHeader.blockdim_x;
 		const int yBlocks = (imageHeight + astcHeader.blockdim_y - 1) / astcHeader.blockdim_y;
 
 		astcDataSize = xBlocks * yBlocks << 4;
 	}
 
-	// Store texture attribute that shader use
+	// 셰이더에 사용될 텍스처 속성을 저장합니다.
 	TextureAttributes.insert(std::make_pair(fileName, uvec3{ imageWidth, imageHeight, *textureOffsetX }));
 
-	// 세로를 4픽셀을 기준하여 한 라인으로 나열했을 때 각 텍스처의 텍스처 어레이 오프셋 값이 정해진다.
+	// 세로를 4픽셀을 기준하여 한 라인으로 나열했을 때 각 텍스처의 텍스처 어레이 오프셋 값이 정해집니다.
 	imageWidth = static_cast<int>(ceilf(imageWidth / 4.0f)) * 4;
 	imageHeight = static_cast<int>(ceilf(imageHeight / 4.0f));
+
 	*textureOffsetX += imageWidth * imageHeight;
-
-	astcFiles->push_back({ astcDataSize, astcData });
-
 	*allAstcDataSize += astcDataSize;
+	astcFiles->push_back({ astcDataSize, astcData });
 }
 
 void CompileShader(GLuint* shader, const GLenum type, const char* shaderFilePath)
@@ -433,7 +472,7 @@ void CompileShader(GLuint* shader, const GLenum type, const char* shaderFilePath
 	FILE* shaderFile = fopen(shaderFilePath, "r");
 	assert(shaderFile != nullptr && "Failed to load shader");
 
-	// 셰이더 파일 사이즈 크기를 가져온다.
+	// 셰이더 파일 크기를 가져옵니다.
 	fseek(shaderFile, 0, SEEK_END);
 	const uint32_t shaderFileSize = static_cast<uint32_t>(ftell(shaderFile));
 	rewind(shaderFile);
@@ -441,7 +480,7 @@ void CompileShader(GLuint* shader, const GLenum type, const char* shaderFilePath
 	auto shaderSource = std::make_unique<char[]>(shaderFileSize);
 	fread(shaderSource.get(), shaderFileSize, 1, shaderFile);
 
-	// 유니크 포인터로 넘기는 것은 불가능하기 때문에 따로 변수를 만들어 준다.
+	// 유니크 포인터로 넘기는 것은 불가능하기 때문에 따로 변수를 만들어 줍니다.
 	const char* data = shaderSource.get();
 
 	fclose(shaderFile);
@@ -450,7 +489,7 @@ void CompileShader(GLuint* shader, const GLenum type, const char* shaderFilePath
 	GL_CALL(glShaderSource(*shader, 1, &data, nullptr));
 	GL_CALL(glCompileShader(*shader));
 
-#ifdef _DEBUG // 디버그 모드일 때 셰이더 오류를 검사한다.
+#ifdef _DEBUG // 디버그 모드일 때 셰이더 오류를 검사합니다.
 	GLint bSuccess = 0;
 	GL_CALL(glGetShaderiv(*shader, GL_COMPILE_STATUS, &bSuccess));
 
