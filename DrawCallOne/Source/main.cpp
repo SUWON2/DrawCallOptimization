@@ -2,21 +2,20 @@
 	이메일: entryswlee@gmail.com
 
 	이 소스 코드는 OpenGLES 3.1 버전을 사용하여 DrawCall을 1로 만드는 방법을 소개합니다.
-	보통 여러 텍스처를 한 번에 패스하기 위해 텍스처 아틀라스를 사용합니다.
-	그러나 이러한 방식은 유연성이 떨어집니다.
+	보통 여러 텍스처를 한 번에 패스하기 위해 텍스처 아틀라스를 사용합니다. 그러나 이 방식은 몇 가지 단점이 존재합니다.
 	예를 들어 2048x32 크기 이미지를 사용한다면 자른 후에 텍스처 아틀라스에 배치를 해야거나 아예 이미지 하나를 따로 처리해야 되는 경우가 생깁니다.
 	또 임의의 이미지가 어느 한 텍스처 아틀라스에 배치되어 있다고 하면 그 이미지 하나만 사용하더라도
 	그 텍스처 아틀라스에 있는 모든 이미지를 불러오기 때문에 성능에 영향을 미칩니다.
-	그러나 이 샘플 코드는 이러한 단점들을 모두 해결합니다.
+	이 샘플 코드는 이러한 단점들을 모두 해결합니다.
 
-	순수 기술 설명을 위해 C-Style로 코드를 작성했으며 Desktop에서 구동시키 위해 GLFW 라이브러를 사용합니다.
+	순수 기술 설명을 위해 C-Style로 코드를 작성했으며 Desktop에서 구동시키 위해 GLFW와 Mali OpenGL ES Emulator를 사용합니다.
 	만약 모바일 포팅을 원하는 경우 NDK를 이용하셔야 됩니다.
 	모바일로 포팅할 때 안드로이드 스튜디오를 이용하는 방법도 있지만 구글을 통해 비주얼 스튜디오로도 포팅할 수 있는 방법을 찾을 수 있습니다.
 
-	사용한 기술은 Instancing Rendering, Texture Array, Astc Compression이며 이 세 기술을 다 사용하기 위해서는 최소 OpenGLES 3.1 버전 이상을 필요로 합니다.
+	사용한 기술은 Instancing Rendering, Texture Array, Astc Compression 등 이며 이 세 기술을 다 사용하기 위해서는 최소 OpenGLES 3.1 버전 이상을 필요로 합니다.
 	즉 옛날 스마트폰에서는 호환이 안 될 수 있기 때문에 유의하셔야 됩니다.
-	그리고 이 소스 코드는 CPU와 관련된 것이지 GPU는 셰이더 구간과 VRAM에 저장되는 방식을 제외하고는 거의 관련이 없습니다.
-	만약 DirectX 사용자라면 동작 원리만 파악해도 DirectX 11 이상 버전에서는 이 기술을 적용할 수 있을 겁니다.
+	그리고 이 소스 코드는 CPU와 관련된 것으로 GPU는 셰이더 구간과 VRAM에 저장되는 방식을 제외하고는 거의 관련이 없습니다.
+	만약 DirectX 사용자라면 동작 원리만 파악해도 DirectX 11 이상 버전에서는 이 기술을 무난하게 적용할 수 있을 겁니다.
 
 	코드를 분석할 때는 main 함수부터 추적하는 방식을 추천합니다.
 	마지막으로 궁금한 점이나 개선점이 있으면 이메일 주세요~
@@ -72,8 +71,9 @@ struct AstcHeader
 static constexpr int SCREEN_WIDTH = 1280;
 static constexpr int SCREEN_HEIGHT = 720;
 
-// GPU 사용량이 90% 근처일 때까지 스프라이트 개수를 조정하여 CPU 사용량을 테스트해 보세요!
-// 그리고 주의할 점은 Release 모드로 설정한 뒤 테스트를 하셔야 됩니다.
+// 스프라이트 개수를 적게 설정했을 때 CPU 사용량과 GPU가 90%일 때까지 스프라이트 개수를 설정한 CPU 사용량의 차이를 확인해 보세요
+// 혹은 프레임을 통한 방법과 성능 프로파일러를 이용한 방법도 있습니다.
+// 여기서 주의할 점은 Release 모드로 설정한 뒤 테스트를 하셔야 됩니다.
 static constexpr int SPRITE_COUNT = 3500;
 
 static const mat4 PROJECTION_VIEW = 
@@ -146,20 +146,35 @@ int main()
 	// 오픈지엘 초기화, 텍스처 로드 등을 처리합니다.
 	Initialize();
 
+	int frameCount = 0;
+	double interval = 0.0;
+	std::chrono::system_clock::time_point startTime;
+	std::chrono::system_clock::time_point endTime;
+
 	while (glfwWindowShouldClose(window) == false)
 	{
-		std::chrono::system_clock::time_point beforeTime = std::chrono::system_clock::now();
+		startTime = std::chrono::system_clock::now();
 
 		// 셰이더 업데이트, 렌더링 등을 처리합니다.
-		Update();
+		{
+			Update();
 
-		glfwPollEvents();
-		glfwSwapBuffers(window);
+			glfwPollEvents();
+			glfwSwapBuffers(window);
+		}
 
-		std::chrono::system_clock::time_point nowTime = std::chrono::system_clock::now();
-		const int interval = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - beforeTime).count());
+		endTime = std::chrono::system_clock::now();
 
-		cout << interval << endl;
+		++frameCount;
+		interval += static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count());
+
+		if (interval >= 1000)
+		{
+			cout << static_cast<double>(frameCount) / (interval * 0.001) << endl;
+
+			frameCount = 0;
+			interval -= 1000;
+		}
 	}
 
 	Shutdown();
@@ -236,6 +251,9 @@ void Initialize()
 		default_random_engine randomEngine;
 		uniform_int_distribution<int> uidHorizontalRange(0, SCREEN_WIDTH);
 		uniform_int_distribution<int> uidVerticalRange(0, SCREEN_HEIGHT);
+
+		// 코드를 간단하게 처리하기 위해 ASTC 파일을 숫자로 지정했습니다.
+		// 리소스 폴더에 존재하는 ASTC 파일의 이름을 랜덤으로 선택합니다.
 		uniform_int_distribution<int> uidImageKindRange(0, 33);
 		
 		for (int i = 0; i < SPRITE_COUNT; ++i)
@@ -339,11 +357,11 @@ void InitializeTextureAtlas()
 		/*
 			이 코드 구간이 가장 중요합니다.
 			우선 모든 ASTC 파일 데이터 모두를 저장하기 위한 큰 버퍼를 하나 할당하고 데이터를 저장시킵니다.
-			그리고 512x512 크기를 가진 텍스처를 필요한 만큼 몇 개 만듭니다. 여기서 사용되는 방식이 텍스처 어레입니다.
+			그리고 512x512 크기를 가진 텍스처를 필요한 만큼 몇 개 만듭니다. 이 방식이 텍스처 어레입니다.
 			마지막으로 버퍼를 텍스처 어레이에 저장합니다.
 
 			위 방법이 가능한 이유는 임의의 이미지 하나를 준비해 주세요
-			그리고 이미지를 하나 더 복사한 후에 윗 부분을 잘라 밑부분만 남겨주세요 이때 공백은 없어야 됩니다.
+			그리고 이미지를 하나 더 복사한 후에 윗 부분을 잘라 밑부분만 남겨주세요 이때 자른 윗 부분에 공백은 없어야 됩니다.
 			그럼 원본 이미지와 밑부분만 남겨진 이미지가 준비되는데 이 두 개를 각각 ASTC 파일로 압축해 주세요
 			마지막으로 두 압축 파일을 헥스 에디터같은 걸로 비교해 보면 아마 밑부분만 있는 ASTC 파일 내용이 원본 이미지 ASTC 파일 내용에 속해있을 겁니다.
 			즉 제 방식은 512x512와 같이 큰 이미지에 모든 이미지를 순차적으로 넣는 개념입니다.
