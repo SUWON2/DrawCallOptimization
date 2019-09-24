@@ -28,7 +28,6 @@ void main()
 
 	_Color = texture(uTexArraySampler, vec3(atlasOffset.xy / 512.0f, atlasOffset.z));
 
-	// if texture atals mode, you must rede this code
 	if (_Color.a < 0.05f)
 	{
 		discard;
