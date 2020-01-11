@@ -215,7 +215,7 @@ void Initialize()
 
 	// 정점 형태를 초기화합니다.
 	{
-		constexpr float vertices[] =
+		const float vertices[] =
 		{
 			1.0f, 1.0f,
 			1.0f, 0.0f,
@@ -223,7 +223,7 @@ void Initialize()
 			0.0f, 1.0f
 		};
 
-		constexpr uint32_t indices[] =
+		const uint32_t indices[] =
 		{
 			0, 1, 3,
 			1, 2, 3
@@ -435,10 +435,10 @@ void InitializeTextureAtlas()
 
 void LoadTexture(const char* fileName, uint32_t* textureOffsetX, size_t* allAstcDataSize, std::list<AstcFile>* astcFiles)
 {
-	const auto& findedTextureAttribute = TextureAttributes.find(fileName);
+	const auto& foundTextureAttribute = TextureAttributes.find(fileName);
 
 	// 이미 등록된 텍스처는 제외하고 기존에 있는 걸 사용하는 방식으로 처리하여 메모리 낭비를 줄입니다.
-	if (findedTextureAttribute != TextureAttributes.end())
+	if (foundTextureAttribute != TextureAttributes.end())
 	{
 		return;
 	}
@@ -521,8 +521,8 @@ void CompileShader(GLuint* shader, const GLenum type, const char* shaderFilePath
 			auto log = std::make_unique<char[]>(logLength);
 			GL_CALL(glGetShaderInfoLog(*shader, logLength, nullptr, log.get()));
 
-			printf(log.get());
-			__debugbreak();
+			fprintf(stderr, "%s", log.get());
+			__asm { int 3 }
 		}
 	}
 #endif
