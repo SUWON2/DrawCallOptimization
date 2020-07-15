@@ -14,7 +14,6 @@
 
 	사용한 기술은 Instancing Rendering, Texture Array, Astc Compression 등 이며 이 세 기술을 다 사용하기 위해서는 최소 OpenGLES 3.1 버전 이상을 필요로 합니다.
 	즉 옛날 스마트폰에서는 호환이 안 될 수 있기 때문에 유의하셔야 됩니다.
-	그리고 이 소스 코드는 CPU와 관련된 것으로 GPU는 셰이더 구간과 VRAM에 저장되는 방식을 제외하고는 거의 관련이 없습니다.
 	만약 DirectX 사용자라면 동작 원리만 파악해도 DirectX 11 이상 버전에서는 이 기술을 무난하게 적용할 수 있을 겁니다.
 
 	코드를 분석할 때는 main 함수부터 추적하는 방식을 추천합니다.
@@ -28,6 +27,7 @@
 #include <list>
 #include <unordered_map>
 #include <chrono>
+#include <Windows.h>
 
 #include <GLFW/glfw3.h>
 #include <GLES3/gl31.h>
@@ -45,9 +45,9 @@ using namespace glm;
 /*** Structures ***/
 struct Sprite
 {
-	std::string imagePath;
-	float x;
-	float y;
+	std::string ImagePath;
+	float X;
+	float Y;
 };
 
 struct AstcFile
@@ -74,10 +74,10 @@ static constexpr int SCREEN_HEIGHT = 720;
 // 스프라이트 개수를 적게 설정했을 때 CPU 사용량과 GPU가 90%일 때까지 스프라이트 개수를 설정한 CPU 사용량의 차이를 확인해 보세요
 // 혹은 프레임을 통한 방법과 성능 프로파일러를 이용한 방법도 있습니다.
 // 여기서 주의할 점은 Release 모드로 설정한 뒤 테스트를 하셔야 됩니다.
-static constexpr int SPRITE_COUNT = 3500;
+static constexpr int SPRITE_COUNT = 1000;
 
 static const mat4 PROJECTION_VIEW = 
-	ortho(0.0f, static_cast<float>(SCREEN_WIDTH), 0.0f, static_cast<float>(SCREEN_HEIGHT), 1.0f, -100.0f)
+	ortho(0.0f, static_cast<float>(SCREEN_WIDTH), 0.0f, static_cast<float>(SCREEN_HEIGHT), 1.0f, -(float)SPRITE_COUNT)
 	* translate(mat4(1.0f), vec3(0.0f, 0.0f, 0.0f));
 
 /*** Global Variables ***/
@@ -157,6 +157,9 @@ int main()
 
 		// 셰이더 업데이트, 렌더링 등을 처리합니다.
 		{
+			glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
 			Update();
 
 			glfwPollEvents();
@@ -166,14 +169,12 @@ int main()
 		endTime = std::chrono::system_clock::now();
 
 		++frameCount;
-		interval += static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count());
 
-		if (interval >= 1000)
+		const long delayTime = 16 - (long)std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+
+		if (delayTime > 0)
 		{
-			cout << static_cast<double>(frameCount) / (interval * 0.001) << endl;
-
-			frameCount = 0;
-			interval -= 1000;
+			Sleep(delayTime);
 		}
 	}
 
@@ -192,6 +193,7 @@ void ShowGlfwError(int error, const char* description)
 void Initialize()
 {
 	GL_CALL(glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT));
+	GL_CALL(glEnable(GL_DEPTH_TEST));
 
 	// 셰이더를 초기화합니다.
 	{
@@ -282,11 +284,10 @@ void Update()
 	for (int i = 0; i < SPRITE_COUNT; ++i)
 	{
 		const Sprite& Sprite = Sprites[i];
-		const vec2 spritePosition = { Sprite.x, Sprite.y };
-		const uvec3& textureAttribute = TextureAttributes[Sprite.imagePath];
+		const vec3 spritePosition = { Sprite.X, Sprite.Y, i };
+		const uvec3& textureAttribute = TextureAttributes[Sprite.ImagePath];
 
-		constexpr float depth = 0.0f;
-		ProjectionViewWorldBuffer[i] = translate(PROJECTION_VIEW, vec3(spritePosition, depth));
+		ProjectionViewWorldBuffer[i] = translate(PROJECTION_VIEW, spritePosition);
 		ProjectionViewWorldBuffer[i] = scale(ProjectionViewWorldBuffer[i], { uvec2(textureAttribute), 0.0f });
 
 		TextureAttributeBuffer[i] = textureAttribute;
@@ -373,7 +374,7 @@ void InitializeTextureAtlas()
 
 		for (int i = 0; i < SPRITE_COUNT; ++i)
 		{
-			LoadTexture(Sprites[i].imagePath.c_str(), &currentTextureArrayOffsetX, &allAstcDataSize, &astcFiles);
+			LoadTexture(Sprites[i].ImagePath.c_str(), &currentTextureArrayOffsetX, &allAstcDataSize, &astcFiles);
 		}
 
 		constexpr GLsizei textureArrayWidth = 512;
@@ -522,7 +523,7 @@ void CompileShader(GLuint* shader, const GLenum type, const char* shaderFilePath
 			GL_CALL(glGetShaderInfoLog(*shader, logLength, nullptr, log.get()));
 
 			fprintf(stderr, "%s", log.get());
-			__asm { int 3 }
+			__debugbreak();
 		}
 	}
 #endif
